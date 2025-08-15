@@ -3,7 +3,6 @@ from pydantic import BaseModel
 import mysql.connector
 import os
 
-# Environment variables from Render
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = int(os.getenv("DB_PORT", 3306))
 DB_USER = os.getenv("DB_USER")
@@ -12,12 +11,10 @@ DB_NAME = os.getenv("DB_NAME")
 
 app = FastAPI()
 
-# Request model for checking a license
 class LicenseRequest(BaseModel):
     mac: str
     license_key: str
 
-# Request model for registering a new device
 class RegisterRequest(BaseModel):
     mac: str
     license_key: str
@@ -31,7 +28,8 @@ def check_license(req: LicenseRequest):
             port=DB_PORT,
             user=DB_USER,
             password=DB_PASSWORD,
-            database=DB_NAME
+            database=DB_NAME,
+            ssl_disabled=True
         )
         cursor = conn.cursor()
         cursor.execute(
@@ -59,10 +57,31 @@ def register_device(req: RegisterRequest):
             port=DB_PORT,
             user=DB_USER,
             password=DB_PASSWORD,
-            database=DB_NAME
+            database=DB_NAME,
+            ssl_disabled=True
         )
         cursor = conn.cursor()
-        # Check if license key exists
-        cursor.execute("SELECT device_key FROM device_keys WHERE device_key = %s", (req.license_key,))
-        result = cursor.fetchone()
-        if not result:
+
+        # Check if key exists
+        cursor.execute(
+            "SELECT mac_address FROM device_keys WHERE device_key = %s",
+            (req.license_key,)
+        )
+        key_exists = cursor.fetchone()
+        if not key_exists:
+            return {"status": "invalid", "message": "License key not found."}
+
+        # Update mac and email
+        cursor.execute(
+            "UPDATE device_keys SET mac_address = %s, email = %s WHERE device_key = %s",
+            (req.mac, req.email, req.license_key)
+        )
+        conn.commit()
+        return {"status": "valid"}
+    except mysql.connector.Error as err:
+        return {"status": "error", "message": str(err)}
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
