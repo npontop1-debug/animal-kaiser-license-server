@@ -1,66 +1,72 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import mysql.connector
 import os
 
-# Get DB credentials from Render Environment Variables
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = int(os.getenv("DB_PORT", 3306))
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
-
 app = FastAPI()
 
-class LicenseRequest(BaseModel):
+# Database config from environment variables (set these in Render)
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME = os.getenv("DB_NAME", "defaultdb")
+
+def get_db_connection():
+    return mysql.connector.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME
+    )
+
+class LicenseCheck(BaseModel):
     mac: str
     license_key: str
-    email: str = None  # optional, used when registering new MAC
+
+class RegisterDevice(BaseModel):
+    mac: str
+    license_key: str
+    email: str
 
 @app.post("/check_license")
-def check_license(req: LicenseRequest):
-    try:
-        conn = mysql.connector.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME
-        )
-        cursor = conn.cursor()
+def check_license(data: LicenseCheck):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    query = "SELECT * FROM licenses WHERE mac_address=%s OR license_key=%s"
+    cursor.execute(query, (data.mac, data.license_key))
+    result = cursor.fetchone()
+    
+    if not result:
+        conn.close()
+        return {"status": "invalid"}
 
-        # Check if license exists
-        cursor.execute(
-            "SELECT email, mac_address FROM device_keys WHERE device_key = %s",
-            (req.license_key,)
-        )
-        result = cursor.fetchone()
+    conn.close()
+    return {"status": "valid", "email": result["email"]}
 
-        if result:
-            db_email, db_mac = result
+@app.post("/register_device")
+def register_device(data: RegisterDevice):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    # Check if license key exists
+    cursor.execute("SELECT * FROM licenses WHERE license_key=%s", (data.license_key,))
+    license_row = cursor.fetchone()
+    
+    if not license_row:
+        conn.close()
+        return {"status": "invalid", "message": "License key not found"}
+    
+    # Update license row with mac and email
+    cursor.execute(
+        "UPDATE licenses SET mac_address=%s, email=%s WHERE license_key=%s",
+        (data.mac, data.email, data.license_key)
+    )
+    conn.commit()
+    conn.close()
+    
+    return {"status": "valid", "email": data.email}
 
-            if db_mac == req.mac:
-                # MAC matches, valid license
-                return {"status": "valid", "email": db_email}
-            elif db_mac is None:
-                # MAC not set yet, register new device
-                cursor.execute(
-                    "UPDATE device_keys SET mac_address = %s, email = %s WHERE device_key = %s",
-                    (req.mac, req.email or db_email, req.license_key)
-                )
-                conn.commit()
-                return {"status": "valid", "email": req.email or db_email}
-            else:
-                # MAC does not match, invalid
-                return {"status": "invalid"}
-        else:
-            return {"status": "invalid"}
-
-    except mysql.connector.Error as err:
-        return {"status": "error", "message": str(err)}
-
-    finally:
-        if 'cursor' in locals():
-            cursor.close()
-        if 'conn' in locals() and conn.is_connected():
-            conn.close()
+@app.get("/")
+def root():
+    return {"message": "License server running"}
